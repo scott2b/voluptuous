@@ -84,12 +84,30 @@ Validate like so:
 
 import os
 import re
+import string
 import types
 import urlparse
 
 
 __author__ = 'Alec Thomas <alec@swapoff.org>'
 __version__ = '0.4'
+
+FRIENDLY_TYPES = {
+    'int': 'integer'
+}
+
+
+def friendly_type(name):
+    if hasattr(name, '__name__'):
+        name = name.__name__
+    return FRIENDLY_TYPES.get(name, name)
+
+class Undefined(object):
+    def __nonzero__(self):
+        return False
+
+    def __repr__(self):
+        return '...'
 
 
 class Undefined(object):
@@ -130,6 +148,10 @@ class Invalid(Error):
         path = ' @ data[%s]' % ']['.join(map(repr, self.path)) \
                 if self.path else ''
         return Exception.__str__(self) + path
+
+    def tuple(self):
+        path = '.'.join(self.path) if self.path else ''
+        return path, Exception.__str__(self)
 
 
 class InvalidList(Invalid):
@@ -220,14 +242,14 @@ class Schema(object):
             >>> validate({'one': 'three'})
             Traceback (most recent call last):
             ...
-            InvalidList: not a valid value for dictionary value @ data['one']
+            InvalidList: not a valid value @ data['one']
 
         An invalid key:
 
             >>> validate({'two': 'three'})
             Traceback (most recent call last):
             ...
-            InvalidList: extra keys not allowed @ data['two']
+            InvalidList: not a valid value for dictionary key @ data['two']
 
         Validation function, in this case the "int" type:
 
@@ -245,7 +267,7 @@ class Schema(object):
             >>> validate({'10': 'twenty'})
             Traceback (most recent call last):
             ...
-            InvalidList: extra keys not allowed @ data['10']
+            InvalidList: not a valid value for dictionary key @ data['10']
 
         Wrap them in the coerce() function to achieve this:
 
@@ -255,6 +277,19 @@ class Schema(object):
             {10: 'twenty'}
 
         (This is to avoid unexpected surprises.)
+
+        Nested dict
+
+            >>> validate = Schema({str: {str: int}})
+
+            >>> validate({'one': {'two': 2}})
+            {'one': {'two': 2}}
+
+            >>> validate({'one': {'two': 'two'}})
+            Traceback (most recent call last):
+            ...
+            InvalidList: expected integer @ data['one']['two']
+
         """
         if not isinstance(data, dict):
             raise Invalid('expected a dictionary', path)
@@ -265,6 +300,7 @@ class Schema(object):
                             (self.required and not isinstance(key, optional))
                             or
                             isinstance(key, required))
+        invalid = None
         error = None
         errors = []
         for key, value in data.iteritems():
@@ -280,6 +316,7 @@ class Schema(object):
                             raise
                         if not error or len(e.path) > len(error.path):
                             error = e
+                        invalid = e.msg + ' for dictionary key'
                         continue
                 # Backtracking is not performed once a key is selected, so if
                 # the value is invalid we immediately throw an exception.
@@ -289,7 +326,7 @@ class Schema(object):
                     if len(e.path) > len(key_path):
                         errors.append(e)
                     else:
-                        errors.append(Invalid(e.msg + ' for dictionary value',
+                        errors.append(Invalid(e.msg,
                                 e.path))
                     break
 
@@ -301,10 +338,21 @@ class Schema(object):
                     if self.include_extra:
                         out[key] = value
                 else:
-                    errors.append(Invalid('extra keys not allowed',
-                            key_path))
-        for key in required_keys:
-            errors.append(Invalid('required key not provided', path + [key]))
+                    if invalid:
+                        if len(error.path) > len(path) + 1:
+                            errors.append(error)
+                        else:
+                            errors.append(Invalid(invalid, key_path))
+                    else:
+                        errors.append(Invalid('extra keys not allowed',
+                                key_path))
+        if required_keys:
+            if len(required_keys) > 1:
+                message = 'required keys %s not provided' \
+                        % ', '.join(map(repr, map(str, required_keys)))
+            else:
+                message = 'required key %r not provided' % required_keys.pop()
+            errors.append(Invalid(message, path))
         if errors:
             raise InvalidList(errors)
         return out
@@ -380,7 +428,8 @@ class Schema(object):
         """
         if type(schema) is type:
             if not isinstance(data, schema):
-                raise Invalid('expected %s' % schema.__name__, path)
+                raise Invalid('expected %s' % friendly_type(schema.__name__),
+                    path)
         elif callable(schema):
             try:
                 return schema(data)
@@ -399,12 +448,11 @@ class marker(object):
 
     def __init__(self, schema, msg=None):
         self.schema = schema
-        self._schema = Schema(schema)
         self.msg = msg
 
     def __call__(self, v):
         try:
-            return self._schema(v)
+            return Schema(self.schema)(v)
         except Invalid, e:
             if not self.msg or len(e.path) > 1:
                 raise
@@ -449,7 +497,6 @@ def msg(schema, msg):
     ...
     InvalidList: invalid list value @ data[0][0]
     """
-    schema = Schema(schema)
     def f(v):
         try:
             return schema(v)
@@ -458,6 +505,7 @@ def msg(schema, msg):
                 raise e
             else:
                 raise Invalid(msg)
+    schema = Schema(schema)
     return f
 
 
@@ -471,7 +519,8 @@ def coerce(type, msg=None):
         try:
             return type(v)
         except ValueError:
-            raise Invalid(msg or ('expected %s' % type.__name__))
+            raise Invalid(msg or ('expected %s' % friendly_type(
+                type.__name__)))
     return f
 
 
@@ -563,21 +612,22 @@ def any(*validators, **kwargs):
     >>> validate('moo')
     Traceback (most recent call last):
     ...
-    InvalidList: no valid value found
+    InvalidList: value must be one of [true,false,f]
     """
     msg = kwargs.pop('msg', None)
-    schemas = [Schema(val) for val in validators]
 
     def f(v):
-        for schema in schemas:
+        for validator in validators:
             try:
-                return schema(v)
+                return Schema(validator)(v)
             except Invalid, e:
                 if len(e.path) > 1:
                     raise
                 pass
         else:
-            raise Invalid(msg or 'no valid value found')
+            #raise Invalid(msg or 'no valid value found')
+            raise Invalid(msg or 'value must be one of [%s]' % 
+                ','.join([friendly_type(v) for v in validators]))
     return f
 
 
@@ -593,12 +643,11 @@ def all(*validators, **kwargs):
     10
     """
     msg = kwargs.pop('msg', None)
-    schemas = [Schema(val) for val in validators]
 
     def f(v):
         try:
-            for schema in schemas:
-                v = schema(v)
+            for validator in validators:
+                v = Schema(validator)(v)
         except Invalid, e:
             raise Invalid(msg or e.msg)
         return v
@@ -648,14 +697,19 @@ def sub(pattern, substitution, msg=None):
     return f
 
 
-def url(msg=None):
+def url(msg=None, req_scheme=True):
     """Verify that the value is a URL."""
     def f(v):
+        u = None
         try:
-            urlparse.urlparse(v)
-            return v
+            u = urlparse.urlparse(v)
         except:
             raise Invalid(msg or 'expected a URL')
+        if req_scheme and not u.scheme:
+            raise Invalid(msg or 'URL scheme required')
+        if not u.netloc:
+            raise Invalid(msg or 'URL net location required')
+        return v
     return f
 
 
