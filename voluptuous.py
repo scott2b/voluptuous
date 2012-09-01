@@ -184,19 +184,19 @@ class Schema(object):
     validate and optionally convert the value.
     """
 
-    def __init__(self, schema, required=False, allow_extra=False,
+    def __init__(self, schema, required=False, extra=False,
             include_extra=False):
         """Create a new Schema.
 
         :param schema: Validation schema. See :module:`voluptuous` for details.
         :param required: Keys defined in the schema must be in the data.
-        :param allow_extra: Keys in the data need not have keys in the schema.
+        :param extra: Keys in the data need not have keys in the schema.
         :param include_extra: Include non-schematized params in the data
-            (only used if allow_extra is True)
+            (only used if extra is True)
         """
         self.schema = schema
         self.required = required
-        self.allow_extra = allow_extra
+        self.extra = extra
         self.include_extra = include_extra
 
     def __call__(self, data):
@@ -334,7 +334,7 @@ class Schema(object):
                 required_keys.discard(skey)
                 break
             else:
-                if self.allow_extra:
+                if self.extra:
                     if self.include_extra:
                         out[key] = value
                 else:
